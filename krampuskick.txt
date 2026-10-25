@@ -1,0 +1,548 @@
+local function startLoopSpamKickWorker()
+    task.spawn(function()
+        local targetName = TargetRuntime.loopSpamKickTarget and TargetRuntime.loopSpamKickTarget.Name or nil
+
+        local currentFPS = 60
+        local fpsConnection = RunService.RenderStepped:Connect(function(dt)
+            if dt > 0 then currentFPS = 1 / dt end
+        end)
+
+        local dragging = false
+        local grabStartTime = 0
+        local checkStartTime = 0
+        local teleportBackCompleted = false
+
+        -- AlignPosition and AlignOrientation instances
+        local alignPos, alignOri
+
+        local function cleanupBodies()
+            pcall(function()
+                if alignPos then alignPos:Destroy() alignPos = nil end
+                if alignOri then alignOri:Destroy() alignOri = nil end
+            end)
+        end
+
+        local function createAligns(targetRoot, targetAttachPos, targetAttachRot)
+            cleanupBodies()
+            
+            -- Remove any existing AlignPosition/Orientation
+            for _, v in pairs(targetRoot:GetChildren()) do
+                if v:IsA("AlignPosition") or v:IsA("AlignOrientation") then 
+                    v:Destroy() 
+                end
+            end
+            
+            -- Create attachment on target
+            local targetAttachment = Instance.new("Attachment")
+            targetAttachment.Position = Vector3.new(0, 0, 0)
+            targetAttachment.Orientation = Vector3.new(0, 0, 0)
+            targetAttachment.Parent = targetRoot
+            
+            -- Create attachment for reference (world space)
+            local worldAttachment = Instance.new("Attachment")
+            worldAttachment.Position = targetAttachPos
+            worldAttachment.Orientation = Vector3.new(0, 0, 0)
+            worldAttachment.Parent = workspace.Terrain -- or workspace
+            
+            -- AlignPosition
+            alignPos = Instance.new("AlignPosition")
+            alignPos.Attachment0 = targetAttachment
+            alignPos.Attachment1 = worldAttachment
+            alignPos.RigidityEnabled = true
+            alignPos.MaxForce = 9e9
+            alignPos.MaxVelocity = 9e9
+            alignPos.ReactionForceEnabled = false
+            alignPos.Responsiveness = 9e9
+            alignPos.Parent = targetRoot
+            
+            -- AlignOrientation
+            alignOri = Instance.new("AlignOrientation")
+            alignOri.Attachment0 = targetAttachment
+            alignOri.Attachment1 = worldAttachment
+            alignOri.MaxTorque = 9e9
+            alignOri.MaxAngularVelocity = 9e9
+            alignOri.ReactionTorqueEnabled = false
+            alignOri.Responsiveness = 9e9
+            alignOri.Parent = targetRoot
+            
+            return targetAttachment, worldAttachment
+        end
+
+        local function updateAlignPosition(targetAttachPos)
+            if alignPos and alignPos.Attachment1 then
+                alignPos.Attachment1.Position = targetAttachPos
+            end
+        end
+
+        local myCharacterInit = localPlayer.Character
+        local myRootInit = myCharacterInit and myCharacterInit:FindFirstChild("HumanoidRootPart")
+        local savedPos = myRootInit and myRootInit.CFrame or CFrame.new()
+        local sx, sy, sz = savedPos.Position.X, savedPos.Position.Y, savedPos.Position.Z
+
+        while TargetRuntime.loopSpamKickEnabled do
+            RunService.Heartbeat:Wait()
+
+            local target = TargetRuntime.loopSpamKickTarget
+            if not target or not target.Parent then
+                if targetName then 
+                    target = Players:FindFirstChild(targetName) 
+                end
+                if not target then 
+                    target = getFirstSelectedLoopTarget() 
+                end
+                TargetRuntime.loopSpamKickTarget = target
+                if not target then 
+                    continue 
+                end
+                targetName = target.Name
+            end
+
+            if IsPlayerInsideSafeZone(target) then
+                dragging = false
+                grabStartTime = 0
+                checkStartTime = 0
+                teleportBackCompleted = false
+                cleanupBodies()
+                checkAndAlertSafeZone(target)
+                continue 
+            end
+
+            local myCharacter = localPlayer.Character
+            local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+            local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+            if not (myRoot and myHumanoid) then 
+                continue 
+            end
+
+            local targetCharacter = target.Character
+            local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+            local targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
+
+            if not (targetRoot and targetHumanoid and targetHumanoid.Health > 0) then
+                dragging = false
+                grabStartTime = 0
+                checkStartTime = 0
+                teleportBackCompleted = false
+                cleanupBodies()
+                continue
+            end
+
+            if dragging and not teleportBackCompleted then
+                local currentMyPos = myRoot.CFrame
+                local targetOffset = targetRoot.Position - currentMyPos.Position
+                
+                myRoot.CFrame = CFrame.new(sx, sy, sz)
+                
+                local newTargetPos = Vector3.new(sx, sy + 12, sz) + Vector3.new(targetOffset.X, 0, targetOffset.Z)
+                targetRoot.CFrame = CFrame.new(newTargetPos)
+                
+                teleportBackCompleted = true
+                
+                -- Update align position
+                local lockPos = myRoot.CFrame * CFrame.new(0, 20, 0)
+                if alignPos and alignPos.Attachment1 then
+                    alignPos.Attachment1.Position = lockPos.Position
+                else
+                    createAligns(targetRoot, lockPos.Position, targetRoot.CFrame.Rotation)
+                end
+            end
+
+            if targetCharacter.Parent ~= workspace then
+                dragging = false
+                grabStartTime = 0
+                checkStartTime = 0
+                teleportBackCompleted = false
+                cleanupBodies()
+
+                local blob = bgk_getSeatedParent() or (function()
+                    local folder = workspace:FindFirstChild(localPlayer.Name .. "SpawnedInToys")
+                    return folder and folder:FindFirstChild("CreatureBlobman") or nil
+                end)()
+                
+                if not blob then
+                    blob = safeInvokeRemote(SpawnToyRF, "CreatureBlobman", myRoot.CFrame * CFrame.new(5, 5, 20), Vector3.new(0, 97.69, 0))
+                end
+                
+                repeat 
+                    task.wait() 
+                until not TargetRuntime.loopSpamKickEnabled or (blob and blob:FindFirstChild("RightDetector") and blob:FindFirstChild("VehicleSeat"))
+                
+                if not TargetRuntime.loopSpamKickEnabled then 
+                    break 
+                end
+                
+                if blob then
+                    repeat
+                        task.wait()
+                        blob.VehicleSeat:Sit(myHumanoid)
+                    until not TargetRuntime.loopSpamKickEnabled or myHumanoid.SeatPart == blob.VehicleSeat
+                    
+                    if not TargetRuntime.loopSpamKickEnabled then 
+                        break 
+                    end
+
+                    local CG = blob.BlobmanSeatAndOwnerScript and blob.BlobmanSeatAndOwnerScript:FindFirstChild("CreatureGrab")
+                    local CD = blob.BlobmanSeatAndOwnerScript and blob.BlobmanSeatAndOwnerScript:FindFirstChild("CreatureRelease")
+
+                    repeat
+                        task.wait()
+                        blob.HumanoidRootPart.CFrame = targetRoot.CFrame
+                        task.wait(0.1)
+                        if CG then 
+                            CG:FireServer(blob.RightDetector, targetRoot, blob.RightDetector.RightWeld) 
+                        end
+                        if CD then 
+                            CD:FireServer(blob.RightDetector.RightWeld) 
+                        end
+                    until not TargetRuntime.loopSpamKickEnabled or CheckNetworkOwnerShipOnPlayer(target)
+                    
+                    if not TargetRuntime.loopSpamKickEnabled then 
+                        break 
+                    end
+
+                    task.wait(0.2)
+                    safeFireRemote(DeleteToyRE, blob)
+                    myRoot.CFrame = CFrame.new(sx, sy, sz)
+                    task.wait(0.1)
+                    targetRoot.CFrame = CFrame.new(sx, sy + 12, sz + 10)
+                    task.wait(0.5)
+                end
+                continue
+            end
+
+            if not dragging then
+                myRoot.CFrame = targetRoot.CFrame * CFrame.new(0, -20, 0)
+                cleanupBodies()
+                checkStartTime = 0
+                teleportBackCompleted = false
+
+                pcall(function()
+                    targetHumanoid.PlatformStand = true
+                    targetHumanoid.Sit = true
+                end)
+
+                if TargetRuntime.selectedKickMethod == TargetRuntime.KickMethods.FASTER_CAN_LAG then
+                    pcall(function()
+                        if currentFPS > 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)                           
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)    
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)                            
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        elseif currentFPS >= 155 and currentFPS <= 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            RunService.HeartBeat:Wait()
+							RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)    
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)    
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)                        
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        else
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(destroyGrabLineEvent, targetRoot) 
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)                    
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        end
+                    end)
+                else
+                    pcall(function()
+                        if currentFPS > 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)                            
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                        elseif currentFPS >= 155 and currentFPS <= 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                        else
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							
+                        end
+                    end)
+                end
+
+                if grabStartTime == 0 then 
+                    grabStartTime = tick() 
+                end
+                
+                if tick() - grabStartTime > 0.35 then
+                    dragging = true
+                    grabStartTime = 0
+                    checkStartTime = tick()
+                   
+                    local lockPos = myRoot.CFrame * CFrame.new(0, 20, 0)
+                    
+                    -- Create AlignPosition/Orientation
+                    createAligns(targetRoot, lockPos.Position, targetRoot.CFrame.Rotation)
+                end
+            else
+                -- Update lock position continuously
+                local lockPos = myRoot.CFrame * CFrame.new(0, 20, 0)
+
+                if alignPos and alignPos.Attachment1 then
+                    -- Update the world attachment position
+                    alignPos.Attachment1.Position = lockPos.Position
+                    if alignOri and alignOri.Attachment1 then
+                        alignOri.Attachment1.Position = lockPos.Position
+                    end
+                else
+                    createAligns(targetRoot, lockPos.Position, targetRoot.CFrame.Rotation)
+                end
+
+                targetHumanoid.PlatformStand = true
+
+                if TargetRuntime.selectedKickMethod == TargetRuntime.KickMethods.FASTER_CAN_LAG then
+                    pcall(function()
+                        if currentFPS > 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        elseif currentFPS >= 155 and currentFPS <= 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							RunService.HeartBeat:Wait()
+                        else
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)  
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, targetRoot.CFrame)
+							safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        end
+                    end)
+                else
+                    pcall(function()
+                        if currentFPS > 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)                            
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                        elseif currentFPS >= 155 and currentFPS <= 200 then
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)                            
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos) 
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                        else
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)                        
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                            RunService.HeartBeat:Wait()
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos) 
+							safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)   
+                            safeFireRemote(setNetworkOwnerEvent, targetRoot, lockPos)
+                            safeFireRemote(destroyGrabLineEvent, targetRoot)
+                        end
+                    end)
+                end
+
+                task.spawn(function()
+                    if TargetRuntime.loopSpamKickRagdollEnabled then
+                        local pallet = ensureLoopSpamKickPallet()
+                        local soundPart = pallet and pallet:FindFirstChild("SoundPart")
+                        if soundPart then
+                            soundPart.AssemblyLinearVelocity = Vector3.new(0, 1000, 0)
+                            soundPart.CFrame = targetRoot.CFrame
+                            task.wait(0.05)
+                            if soundPart and soundPart.Parent then
+                                soundPart.CFrame = myRoot.CFrame * CFrame.new(0, 1000, 0)
+                            end
+                        end
+                    end
+                end)
+
+                if checkStartTime > 0 and tick() - checkStartTime > 0.40 then
+                    local currentDist = (targetRoot.Position - lockPos.Position).Magnitude
+                    if currentDist > 45 then
+                        dragging = false
+                        grabStartTime = 0
+                        checkStartTime = 0
+                        teleportBackCompleted = false
+                        cleanupBodies()
+                    else
+                        checkStartTime = tick()
+                    end
+                end
+            end 
+        end 
+
+        fpsConnection:Disconnect()
+        cleanupBodies()
+
+        local finalChar = localPlayer.Character
+        local finalRoot = finalChar and finalChar:FindFirstChild("HumanoidRootPart")
+        if finalRoot then
+            finalRoot.CFrame = CFrame.new(sx, sy, sz)
+        end
+
+        TargetRuntime.loopSpamKickEnabled = false
+        if TargetRuntime.targetKickToggleRef then
+            TargetRuntime.targetToggleSyncing = true
+            TargetRuntime.targetKickToggleRef.Set(false)
+            TargetRuntime.targetToggleSyncing = false
+        end
+        refreshTargetStatus()
+    end)
+end
